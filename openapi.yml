@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: CourtListener Case Law API
   description: |
-    APIs for accessing CourtListener's database of case law. This specification currently only covers the four
+    APIs for accessing CourtListener's database of case law. This specification only covers the four
     primary case law endpoints: Courts, Dockets, Clusters, and Opinions.
 
     **Data Model**: Dockets are filed in particular Courts and contain Clusters of Opinions.
