@@ -1,0 +1,1341 @@
+openapi: 3.1.0
+info:
+  title: CourtListener Case Law API
+  description: |
+    APIs for accessing CourtListener's database of case law. This specification currently only covers the four
+    primary case law endpoints: Courts, Dockets, Clusters, and Opinions.
+
+    **Data Model**: Dockets are filed in particular Courts and contain Clusters of Opinions.
+    - **Court** — metadata about a court (name, abbreviation, founding date, etc.)
+    - **Docket** — metadata about a case (docket number, dates, parties, etc.)
+    - **Cluster** — groups opinions from the same panel hearing (e.g. majority, dissent, concurrence)
+    - **Opinion** — the text of a single decision and metadata about its author
+
+    **Filtering**: Most fields support Django-style double-underscore lookups
+    (`__exact`, `__gte`, `__gt`, `__lte`, `__lt`, `__range`, `__startswith`, etc.).
+    Related filters allow cross-API joins (e.g. `cluster__docket__court=scotus`).
+    Prepend `!` to any filter to negate it (e.g. `court__jurisdiction!=F`).
+
+    **Field Selection**: Use `fields` and `omit` query parameters with comma-separated
+    field names. Nested fields use double-underscore notation.
+
+    **Pagination**: Cursor-based deep pagination is available when ordering by `id`,
+    `date_modified`, or `date_created`. Standard page-based pagination is limited to 100 pages.
+
+    **Rate Limits**: 5,000 requests per hour for authenticated users.
+
+    For full documentation see: https://www.courtlistener.com/help/api/rest/case-law/
+  version: "4.3"
+  contact:
+    name: Free Law Project
+    url: https://www.courtlistener.com/contact/
+  license:
+    name: Public Domain
+    url: https://creativecommons.org/publicdomain/zero/1.0/
+
+servers:
+  - url: https://www.courtlistener.com/api/rest/v4
+    description: CourtListener REST API v4
+
+security:
+  - tokenAuth: []
+  - basicAuth: []
+
+tags:
+  - name: Courts
+    description: Metadata about courts in the CourtListener database.
+  - name: Dockets
+    description: Case-level metadata sitting at the top of the object hierarchy.
+  - name: Clusters
+    description: Opinion clusters grouping related decisions from a single hearing.
+  - name: Opinions
+    description: Individual judicial opinions with full text and metadata.
+
+paths:
+  # ──────────────────────────────────────────────
+  #  COURTS
+  # ──────────────────────────────────────────────
+  /courts/:
+    get:
+      operationId: listCourts
+      summary: List courts
+      description: |
+        Returns a paginated list of courts. Results can generally be cached as
+        court data changes infrequently.
+      tags: [Courts]
+      parameters:
+        - $ref: "#/components/parameters/FieldsParam"
+        - $ref: "#/components/parameters/OmitParam"
+        - $ref: "#/components/parameters/OrderByParam"
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/CursorParam"
+        - $ref: "#/components/parameters/CountParam"
+        - $ref: "#/components/parameters/FormatParam"
+        - name: id
+          in: query
+          description: Filter by court identifier (e.g. `scotus`, `ca9`, `dcd`).
+          schema:
+            type: string
+        - name: id__in
+          in: query
+          description: Filter by multiple court identifiers (comma-separated).
+          schema:
+            type: string
+        - name: jurisdiction
+          in: query
+          description: |
+            Filter by jurisdiction type. Common values:
+            `F` (Federal Appellate), `FD` (Federal District),
+            `FB` (Federal Bankruptcy), `FBP` (Federal Bankruptcy Panel),
+            `FS` (Federal Special), `S` (State Supreme),
+            `SA` (State Appellate), `ST` (State Trial),
+            `SS` (State Special), `SAG` (State Attorney General),
+            `T` (Tribal), `I` (International), `C` (Committee),
+            `TES` (Testing).
+          schema:
+            type: string
+        - name: full_name
+          in: query
+          description: Filter by the full name of the court.
+          schema:
+            type: string
+        - name: full_name__startswith
+          in: query
+          description: Filter courts whose full name starts with the given value.
+          schema:
+            type: string
+        - name: date_modified
+          in: query
+          description: Filter by exact date modified (ISO-8601).
+          schema:
+            type: string
+            format: date-time
+        - name: date_modified__gte
+          in: query
+          description: Filter courts modified on or after this date.
+          schema:
+            type: string
+            format: date-time
+        - name: date_modified__lte
+          in: query
+          description: Filter courts modified on or before this date.
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Paginated list of courts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaginatedCourtList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    options:
+      operationId: optionsCourts
+      summary: Get Courts field descriptions and filter options
+      tags: [Courts]
+      responses:
+        "200":
+          description: Field metadata, filter definitions, and ordering options.
+
+  /courts/{id}/:
+    get:
+      operationId: getCourt
+      summary: Retrieve a single court
+      tags: [Courts]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Court identifier (e.g. `scotus`, `ca9`, `dcd`).
+          schema:
+            type: string
+        - $ref: "#/components/parameters/FieldsParam"
+        - $ref: "#/components/parameters/OmitParam"
+        - $ref: "#/components/parameters/FormatParam"
+      responses:
+        "200":
+          description: Court detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Court"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ──────────────────────────────────────────────
+  #  DOCKETS
+  # ──────────────────────────────────────────────
+  /dockets/:
+    get:
+      operationId: listDockets
+      summary: List dockets
+      description: |
+        Returns a paginated list of dockets. Dockets sit at the top of the case law
+        hierarchy, linking to clusters of opinions.
+
+        **Note**: The response does not inline docket entries, parties, or attorneys
+        (this does not scale). Use the PACER/RECAP APIs for those.
+      tags: [Dockets]
+      parameters:
+        - $ref: "#/components/parameters/FieldsParam"
+        - $ref: "#/components/parameters/OmitParam"
+        - $ref: "#/components/parameters/OrderByParam"
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/CursorParam"
+        - $ref: "#/components/parameters/CountParam"
+        - $ref: "#/components/parameters/FormatParam"
+        # --- Direct filters ---
+        - name: id
+          in: query
+          description: Filter by docket ID (exact).
+          schema:
+            type: integer
+        - name: id__gt
+          in: query
+          schema:
+            type: integer
+          description: Docket IDs greater than this value.
+        - name: id__gte
+          in: query
+          schema:
+            type: integer
+          description: Docket IDs greater than or equal to this value.
+        - name: id__lt
+          in: query
+          schema:
+            type: integer
+          description: Docket IDs less than this value.
+        - name: id__lte
+          in: query
+          schema:
+            type: integer
+          description: Docket IDs less than or equal to this value.
+        - name: id__range
+          in: query
+          schema:
+            type: string
+          description: Docket IDs within an inclusive range (e.g. `500,1000`).
+        - name: court
+          in: query
+          description: Filter by court identifier (e.g. `scotus`). Supports related court filters via `court__` prefix.
+          schema:
+            type: string
+        - name: court__jurisdiction
+          in: query
+          description: Filter by the court's jurisdiction type (e.g. `F`, `FD`, `S`).
+          schema:
+            type: string
+        - name: "court__jurisdiction!"
+          in: query
+          description: Exclude dockets from this jurisdiction type.
+          schema:
+            type: string
+        - name: docket_number
+          in: query
+          description: Filter by exact docket number (e.g. `23A994`).
+          schema:
+            type: string
+        - name: date_created
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Filter by exact creation date.
+        - name: date_created__gte
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Created on or after this date.
+        - name: date_created__lte
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Created on or before this date.
+        - name: date_modified
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Filter by exact modification date.
+        - name: date_modified__gte
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Modified on or after this date.
+        - name: date_modified__lte
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Modified on or before this date.
+        - name: date_filed
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Filter by filing date.
+        - name: date_filed__gte
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Filed on or after this date.
+        - name: date_filed__lte
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Filed on or before this date.
+        - name: date_terminated
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Filter by termination date.
+        - name: date_terminated__gte
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: date_terminated__lte
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: case_name
+          in: query
+          schema:
+            type: string
+          description: Filter by case name.
+        - name: nature_of_suit
+          in: query
+          schema:
+            type: string
+          description: Filter by nature of suit.
+        - name: cause
+          in: query
+          schema:
+            type: string
+          description: Filter by cause.
+        - name: source
+          in: query
+          schema:
+            type: integer
+          description: Filter by docket source.
+        - name: blocked
+          in: query
+          schema:
+            type: boolean
+          description: Filter for blocked/unblocked dockets.
+      responses:
+        "200":
+          description: Paginated list of dockets.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaginatedDocketList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    options:
+      operationId: optionsDockets
+      summary: Get Dockets field descriptions and filter options
+      tags: [Dockets]
+      responses:
+        "200":
+          description: Field metadata, filter definitions, and ordering options.
+
+  /dockets/{id}/:
+    get:
+      operationId: getDocket
+      summary: Retrieve a single docket
+      tags: [Dockets]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Docket ID.
+          schema:
+            type: integer
+        - $ref: "#/components/parameters/FieldsParam"
+        - $ref: "#/components/parameters/OmitParam"
+        - $ref: "#/components/parameters/FormatParam"
+      responses:
+        "200":
+          description: Docket detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Docket"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ──────────────────────────────────────────────
+  #  CLUSTERS
+  # ──────────────────────────────────────────────
+  /clusters/:
+    get:
+      operationId: listClusters
+      summary: List opinion clusters
+      description: |
+        Returns a paginated list of opinion clusters. Each cluster groups together
+        opinions from the same panel hearing (e.g. majority, dissent, concurrence).
+        The cluster `id` is used in CourtListener case law URLs.
+      tags: [Clusters]
+      parameters:
+        - $ref: "#/components/parameters/FieldsParam"
+        - $ref: "#/components/parameters/OmitParam"
+        - $ref: "#/components/parameters/OrderByParam"
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/CursorParam"
+        - $ref: "#/components/parameters/CountParam"
+        - $ref: "#/components/parameters/FormatParam"
+        - name: id
+          in: query
+          schema:
+            type: integer
+          description: Filter by cluster ID.
+        - name: id__gt
+          in: query
+          schema:
+            type: integer
+        - name: id__gte
+          in: query
+          schema:
+            type: integer
+        - name: id__lt
+          in: query
+          schema:
+            type: integer
+        - name: id__lte
+          in: query
+          schema:
+            type: integer
+        - name: id__range
+          in: query
+          schema:
+            type: string
+          description: Inclusive range (e.g. `100,500`).
+        - name: docket
+          in: query
+          schema:
+            type: integer
+          description: Filter by parent docket ID.
+        - name: docket__court
+          in: query
+          schema:
+            type: string
+          description: Filter by the court of the parent docket (e.g. `scotus`).
+        - name: docket__docket_number
+          in: query
+          schema:
+            type: string
+          description: Filter by the docket number of the parent docket.
+        - name: date_created
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: date_created__gte
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: date_created__lte
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: date_modified
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: date_modified__gte
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: date_modified__lte
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: date_filed
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Filter by the date the cluster was filed.
+        - name: date_filed__gte
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: date_filed__lte
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: citation
+          in: query
+          schema:
+            type: string
+          description: Filter by citation.
+        - name: judges
+          in: query
+          schema:
+            type: string
+          description: Filter by judge name string.
+      responses:
+        "200":
+          description: Paginated list of clusters.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaginatedClusterList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    options:
+      operationId: optionsClusters
+      summary: Get Clusters field descriptions and filter options
+      tags: [Clusters]
+      responses:
+        "200":
+          description: Field metadata, filter definitions, and ordering options.
+
+  /clusters/{id}/:
+    get:
+      operationId: getCluster
+      summary: Retrieve a single opinion cluster
+      description: |
+        Look up a cluster by its ID. The cluster ID matches the ID used in
+        CourtListener case law URLs (e.g. `/opinion/2812209/obergefell-v-hodges/`
+        corresponds to cluster ID `2812209`).
+      tags: [Clusters]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Cluster ID (same as the ID in CourtListener case URLs).
+          schema:
+            type: integer
+        - $ref: "#/components/parameters/FieldsParam"
+        - $ref: "#/components/parameters/OmitParam"
+        - $ref: "#/components/parameters/FormatParam"
+      responses:
+        "200":
+          description: Cluster detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Cluster"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ──────────────────────────────────────────────
+  #  OPINIONS
+  # ──────────────────────────────────────────────
+  /opinions/:
+    get:
+      operationId: listOpinions
+      summary: List opinions
+      description: |
+        Returns a paginated list of opinions. Each opinion contains the text of a
+        judicial decision and metadata about the authoring judge.
+
+        **Tip**: Prefer the `html_with_citations` field for opinion text — it contains
+        the raw text with identified and linked citations, and is the field used on
+        the CourtListener website.
+
+        Use `fields` / `omit` parameters to exclude large text fields you don't need.
+      tags: [Opinions]
+      parameters:
+        - $ref: "#/components/parameters/FieldsParam"
+        - $ref: "#/components/parameters/OmitParam"
+        - $ref: "#/components/parameters/OrderByParam"
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/CursorParam"
+        - $ref: "#/components/parameters/CountParam"
+        - $ref: "#/components/parameters/FormatParam"
+        - name: id
+          in: query
+          schema:
+            type: integer
+          description: Filter by opinion ID.
+        - name: id__gt
+          in: query
+          schema:
+            type: integer
+        - name: id__gte
+          in: query
+          schema:
+            type: integer
+        - name: id__lt
+          in: query
+          schema:
+            type: integer
+        - name: id__lte
+          in: query
+          schema:
+            type: integer
+        - name: id__range
+          in: query
+          schema:
+            type: string
+        - name: cluster
+          in: query
+          schema:
+            type: integer
+          description: Filter by parent cluster ID.
+        - name: cluster__docket__court
+          in: query
+          schema:
+            type: string
+          description: Filter by court via the cluster's docket (e.g. `scotus`).
+        - name: cluster__docket__docket_number
+          in: query
+          schema:
+            type: string
+          description: Filter by docket number via the cluster's docket.
+        - name: type
+          in: query
+          schema:
+            type: string
+          description: |
+            Filter by opinion type. Values are prefixed with numbers for sort order.
+            Common types include combined opinion, lead opinion, concurrence, dissent, etc.
+        - name: cited_opinion
+          in: query
+          schema:
+            type: integer
+          description: Filter opinions that cite this opinion ID.
+        - name: date_created
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: date_created__gte
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: date_created__lte
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: date_modified
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: date_modified__gte
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: date_modified__lte
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Paginated list of opinions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaginatedOpinionList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    options:
+      operationId: optionsOpinions
+      summary: Get Opinions field descriptions and filter options
+      tags: [Opinions]
+      responses:
+        "200":
+          description: Field metadata, filter definitions, and ordering options.
+
+  /opinions/{id}/:
+    get:
+      operationId: getOpinion
+      summary: Retrieve a single opinion
+      description: |
+        Look up an opinion by its ID. Note that opinion IDs do **not** reliably
+        match cluster IDs. If you have a CourtListener case URL, use the cluster
+        API to look it up.
+      tags: [Opinions]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Opinion ID.
+          schema:
+            type: integer
+        - $ref: "#/components/parameters/FieldsParam"
+        - $ref: "#/components/parameters/OmitParam"
+        - $ref: "#/components/parameters/FormatParam"
+      responses:
+        "200":
+          description: Opinion detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Opinion"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+# ════════════════════════════════════════════════
+#  COMPONENTS
+# ════════════════════════════════════════════════
+components:
+  securitySchemes:
+    tokenAuth:
+      type: http
+      scheme: bearer
+      x-stainless-auth:
+        scheme_keyword: Token
+      description: |
+        Token-based authentication. Provide the header as:
+        `Authorization: Token <your-token-here>`
+    basicAuth:
+      type: http
+      scheme: basic
+      description: HTTP Basic Authentication using your CourtListener username and password.
+
+  parameters:
+    FieldsParam:
+      name: fields
+      in: query
+      description: |
+        Comma-separated list of fields to include. Supports nested fields via
+        double-underscore notation (e.g. `educations__id`).
+      schema:
+        type: string
+    OmitParam:
+      name: omit
+      in: query
+      description: |
+        Comma-separated list of fields to exclude. Supports nested fields via
+        double-underscore notation.
+      schema:
+        type: string
+    OrderByParam:
+      name: order_by
+      in: query
+      description: |
+        Comma-separated list of fields to order by. Prefix with `-` for
+        descending order. Use a secondary field as a tie-breaker for
+        deterministic ordering (e.g. `date_filed,id`).
+      schema:
+        type: string
+    PageParam:
+      name: page
+      in: query
+      description: Page number for standard pagination (limited to 100 pages).
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+    CursorParam:
+      name: cursor
+      in: query
+      description: |
+        Cursor token for deep pagination. Returned in the `next` / `previous`
+        fields of paginated responses. Available when ordering by `id`,
+        `date_modified`, or `date_created`.
+      schema:
+        type: string
+    CountParam:
+      name: count
+      in: query
+      description: |
+        Set to `on` to return only the total count of matching items without
+        result data. When enabled, pagination parameters are ignored.
+      schema:
+        type: string
+        enum: ["on"]
+    FormatParam:
+      name: format
+      in: query
+      description: |
+        Response serialization format. JSON is default when no `Accept` header
+        is provided.
+      schema:
+        type: string
+        enum: [json, xml, html]
+
+  responses:
+    Unauthorized:
+      description: Authentication credentials were missing or invalid.
+    NotFound:
+      description: The requested resource was not found.
+    RateLimited:
+      description: Rate limit exceeded (5,000 requests/hour for authenticated users).
+
+  schemas:
+    # ── Pagination wrapper ──
+    PaginatedCourtList:
+      type: object
+      properties:
+        count:
+          type: string
+          description: URL to fetch the total count of matching items.
+        next:
+          type: string
+          format: uri
+          nullable: true
+          description: URL for the next page of results, or null.
+        previous:
+          type: string
+          format: uri
+          nullable: true
+          description: URL for the previous page of results, or null.
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/Court"
+
+    PaginatedDocketList:
+      type: object
+      properties:
+        count:
+          type: string
+        next:
+          type: string
+          format: uri
+          nullable: true
+        previous:
+          type: string
+          format: uri
+          nullable: true
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/Docket"
+
+    PaginatedClusterList:
+      type: object
+      properties:
+        count:
+          type: string
+        next:
+          type: string
+          format: uri
+          nullable: true
+        previous:
+          type: string
+          format: uri
+          nullable: true
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/Cluster"
+
+    PaginatedOpinionList:
+      type: object
+      properties:
+        count:
+          type: string
+        next:
+          type: string
+          format: uri
+          nullable: true
+        previous:
+          type: string
+          format: uri
+          nullable: true
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/Opinion"
+
+    # ── Court ──
+    Court:
+      type: object
+      properties:
+        resource_uri:
+          type: string
+          format: uri
+          description: Canonical API URL for this court.
+        id:
+          type: string
+          description: Court identifier (e.g. `scotus`, `ca9`, `dcd`).
+        date_created:
+          type: string
+          format: date-time
+        date_modified:
+          type: string
+          format: date-time
+        full_name:
+          type: string
+          description: Full name of the court.
+        short_name:
+          type: string
+          description: Short/abbreviated name.
+        citation_string:
+          type: string
+          description: String used for citations from this court.
+        url:
+          type: string
+          format: uri
+          description: Court's website URL.
+        start_date:
+          type: string
+          format: date
+          nullable: true
+          description: Date the court was founded.
+        end_date:
+          type: string
+          format: date
+          nullable: true
+          description: Date the court was dissolved, if applicable.
+        jurisdiction:
+          type: string
+          description: Jurisdiction type code.
+        in_use:
+          type: boolean
+          description: Whether this court is currently active.
+        position:
+          type: number
+          description: Sort position for display.
+
+    # ── Docket ──
+    Docket:
+      type: object
+      properties:
+        resource_uri:
+          type: string
+          format: uri
+        id:
+          type: integer
+        court:
+          type: string
+          format: uri
+          description: API URL of the court.
+        court_id:
+          type: string
+          description: Court identifier string.
+        original_court_info:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: Original court information, if available.
+        idb_data:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: Integrated database data, if available.
+        bankruptcy_information:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: Bankruptcy-specific information, if applicable.
+        clusters:
+          type: array
+          items:
+            type: string
+            format: uri
+          description: API URLs of related opinion clusters.
+        audio_files:
+          type: array
+          items:
+            type: string
+            format: uri
+          description: API URLs of related oral argument audio files.
+        assigned_to:
+          type: string
+          format: uri
+          nullable: true
+          description: API URL of the assigned judge.
+        referred_to:
+          type: string
+          format: uri
+          nullable: true
+          description: API URL of the referred judge.
+        absolute_url:
+          type: string
+          description: Relative URL path on CourtListener.
+        date_created:
+          type: string
+          format: date-time
+        date_modified:
+          type: string
+          format: date-time
+        source:
+          type: integer
+          description: Numeric source identifier.
+        appeal_from_str:
+          type: string
+        assigned_to_str:
+          type: string
+          description: Name of the assigned judge (string, not normalized).
+        referred_to_str:
+          type: string
+        panel_str:
+          type: string
+        date_last_index:
+          type: string
+          format: date-time
+          nullable: true
+        date_cert_granted:
+          type: string
+          format: date 
+          nullable: true
+        date_cert_denied:
+          type: string
+          format: date
+          nullable: true
+        date_argued:
+          type: string
+          format: date
+          nullable: true
+        date_reargued:
+          type: string
+          format: date
+          nullable: true
+        date_reargument_denied:
+          type: string
+          format: date
+          nullable: true
+        date_filed:
+          type: string
+          format: date
+          nullable: true
+        date_terminated:
+          type: string
+          format: date
+          nullable: true
+        date_last_filing:
+          type: string
+          format: date
+          nullable: true
+        case_name_short:
+          type: string
+        case_name:
+          type: string
+          description: |
+            Current case name. May change over time (e.g. if a named party
+            changes). See also the cluster's case_name which is frozen at
+            decision time.
+        case_name_full:
+          type: string
+        slug:
+          type: string
+        docket_number:
+          type: string
+          description: The docket number assigned by the court.
+        docket_number_core:
+          type: string
+          description: Normalized core docket number.
+        pacer_case_id:
+          type: string
+          nullable: true
+        cause:
+          type: string
+          nullable: true
+        nature_of_suit:
+          type: string
+          nullable: true
+        jury_demand:
+          type: string
+          nullable: true
+        jurisdiction_type:
+          type: string
+          nullable: true
+        appellate_fee_status:
+          type: string
+        appellate_case_type_information:
+          type: string
+        mdl_status:
+          type: string
+        filepath_ia:
+          type: string
+          format: uri
+          nullable: true
+          description: URL to the Internet Archive docket file.
+        filepath_ia_json:
+          type: string
+          format: uri
+          nullable: true
+          description: URL to the Internet Archive JSON docket file.
+        ia_upload_failure_count:
+          type: integer
+          nullable: true
+        ia_needs_upload:
+          type: boolean
+          nullable: true
+        ia_date_first_change:
+          type: string
+          format: date-time
+          nullable: true
+        date_blocked:
+          type: string
+          format: date
+          nullable: true
+        blocked:
+          type: boolean
+        appeal_from:
+          type: string
+          format: uri
+          nullable: true
+          description: API URL of the court this case was appealed from.
+        tags:
+          type: array
+          items:
+            type: string
+            format: uri
+          description: API URLs of tags on this docket.
+        panel:
+          type: array
+          items:
+            type: string
+            format: uri
+          description: API URLs of judges on the panel.
+
+    # ── Cluster ──
+    Cluster:
+      type: object
+      properties:
+        resource_uri:
+          type: string
+          format: uri
+        id:
+          type: integer
+          description: Cluster ID — used in CourtListener case law URLs.
+        docket:
+          type: string
+          format: uri
+          description: API URL of the parent docket.
+        sub_opinions:
+          type: array
+          items:
+            type: string
+            format: uri
+          description: API URLs of opinions in this cluster.
+        citations:
+          type: array
+          items:
+            $ref: "#/components/schemas/Citation"
+          description: List of parallel citation objects for this cluster.
+        judges:
+          type: string
+          nullable: true
+          description: Judge name(s) as a string (not yet normalized).
+        panel:
+          type: array
+          items:
+            type: string
+            format: uri
+          description: API URLs of judges on the panel (normalized).
+        non_participating_judges:
+          type: array
+          items:
+            type: string
+            format: uri
+          description: API URLs of non-participating judges.
+        date_created:
+          type: string
+          format: date-time
+        date_modified:
+          type: string
+          format: date-time
+        date_filed:
+          type: string
+          format: date
+          nullable: true
+        date_filed_is_approximate:
+          type: boolean
+        case_name_short:
+          type: string
+        case_name:
+          type: string
+          description: Case name frozen at decision time (does not change).
+        case_name_full:
+          type: string
+        slug:
+          type: string
+        source:
+          type: string
+          description: Source of this cluster data.
+        precedential_status:
+          type: string
+          description: Whether this cluster is published, unpublished, etc.
+        date_blocked:
+          type: string
+          format: date
+          nullable: true
+        blocked:
+          type: boolean
+        syllabus:
+          type: string
+          nullable: true
+        headnotes:
+          type: string
+          nullable: true
+        summary:
+          type: string
+          nullable: true
+        disposition:
+          type: string
+          nullable: true
+        history:
+          type: string
+          nullable: true
+        other_dates:
+          type: string
+          nullable: true
+        cross_reference:
+          type: string
+          nullable: true
+        correction:
+          type: string
+          nullable: true
+        citation_count:
+          type: integer
+          description: Number of times this cluster has been cited.
+        absolute_url:
+          type: string
+          description: Relative URL path on CourtListener.
+
+    # ── Opinion ──
+    Opinion:
+      type: object
+      properties:
+        resource_uri:
+          type: string
+          format: uri
+        id:
+          type: integer
+        cluster:
+          type: string
+          format: uri
+          description: API URL of the parent cluster.
+        opinions_cited:
+          type: array
+          items:
+            type: string
+            format: uri
+          description: API URLs of other opinions cited by this one.
+        date_created:
+          type: string
+          format: date-time
+        date_modified:
+          type: string
+          format: date-time
+        type:
+          type: string
+          description: |
+            Opinion type (e.g. combined opinion, lead opinion, concurrence,
+            dissent). Values are number-prefixed for sort priority.
+        sha1:
+          type: string
+          nullable: true
+          description: SHA-1 hash of the opinion content.
+        download_url:
+          type: string
+          format: uri
+          nullable: true
+          description: |
+            Original URL where the opinion was scraped from. Often unreliable
+            as many courts do not maintain stable URIs.
+        local_path:
+          type: string
+          nullable: true
+          description: Path to the binary file for the decision, if available.
+        ordering_key:
+          type: number
+          nullable: true
+          description: |
+            Sort order within the cluster. Only populated for opinions ingested
+            from Harvard or Columbia sources.
+        plain_text:
+          type: string
+          nullable: true
+          description: |
+            Plain text of the opinion. Populated when sourced from a court
+            website as PDF or Microsoft Word document.
+        html:
+          type: string
+          nullable: true
+          description: |
+            HTML content from court websites (Word Perfect or HTML documents)
+            or Resource.org.
+        html_lawbox:
+          type: string
+          nullable: true
+          description: HTML content from the Lawbox donation.
+        html_columbia:
+          type: string
+          nullable: true
+          description: HTML content from the Columbia collaboration.
+        html_anon_2020:
+          type: string
+          nullable: true
+          description: HTML content from the anonymous 2020 source.
+        xml_harvard:
+          type: string
+          nullable: true
+          description: |
+            XML content from Harvard's Caselaw Access Project. Contains rich
+            data but may have OCR artifacts.
+        html_with_citations:
+          type: string
+          nullable: true
+          description: |
+            **Recommended field.** HTML with citations identified and linked.
+            This is the field used on the CourtListener website.
+        extracted_by_ocr:
+          type: boolean
+          description: Whether the text was extracted via OCR.
+        author:
+          type: string
+          format: uri
+          nullable: true
+          description: API URL of the authoring judge (normalized).
+        author_str:
+          type: string
+          nullable: true
+          description: Author name as a string (not normalized).
+        joined_by:
+          type: array
+          items:
+            type: string
+            format: uri
+          description: API URLs of judges who joined this opinion.
+        per_curiam:
+          type: boolean
+          description: Whether this is a per curiam opinion.
+
+    # ── Citation ──
+    Citation:
+      type: object
+      description: A parallel citation for an opinion cluster.
+      properties:
+        volume:
+          type: integer
+          nullable: true
+          description: The volume number of the reporter.
+        reporter:
+          type: string
+          description: The reporter abbreviation (e.g. "U.S.", "S. Ct.").
+        page:
+          type: string
+          nullable: true
+          description: The starting page number in the reporter.
+        type:
+          type: integer
+          description: The citation type identifier.
