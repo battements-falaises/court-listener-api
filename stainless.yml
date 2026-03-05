@@ -83,8 +83,9 @@ settings:
   # doing so may result in test failures due to bugs in the test server.
   #
   # [prism mock http server]: https://stoplight.io/open-source/prism
-  disable_mock_tests: false
+  disable_mock_tests: true
   license: Apache-2.0
+  mock_server: steady
 
 pagination:
   - name: cursor_url_page
